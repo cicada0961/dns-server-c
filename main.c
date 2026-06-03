@@ -4,6 +4,9 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
+
+#define MAX 50
 
 typedef struct Record
 {
@@ -160,50 +163,74 @@ unsigned char *resolve(Record *table, char *domaine)
     return NULL;
 }
 
-void build_resp(Record *table, unsigned char *resp, int *pos, char *domaine)
+int forward(unsigned char *query, int query_len, unsigned char *response)
+{
+    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd == -1)
+    {
+        perror("sockfd");
+        return -1;
+    }
+
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(53);
+    dest.sin_addr.s_addr = inet_addr("8.8.8.8");
+
+    sendto(sockfd, query, query_len, 0, (struct sockaddr *)&dest, sizeof(dest));
+    socklen_t dest_len = sizeof(dest);
+    int n = recvfrom(sockfd, response, 512, 0, (struct sockaddr *)&dest, &dest_len);
+    close(sockfd);
+
+    return n;
+}
+
+int build_resp(Record *table, unsigned char *resp, int *pos, char *domaine, unsigned char *buff, int query_len)
 {
     unsigned char *d = resolve(table, domaine);
 
-    resp[*pos] = 0xC0;
-    resp[*pos + 1] = 0x0C;
-    *pos += 2;
-
-    resp[*pos] = 0x00;
-    resp[*pos + 1] = 0x01;
-    *pos += 2;
-
-    resp[*pos] = 0x00;
-    resp[*pos + 1] = 0x01;
-    *pos += 2;
-
-    resp[*pos] = 0x00;
-    resp[*pos + 1] = 0x00;
-    resp[*pos + 2] = 0x01;
-    resp[*pos + 3] = 0x2C;
-    *pos += 4;
-
-    resp[*pos] = 0x00;
-    resp[*pos + 1] = 0x04;
-    *pos += 2;
-
-    if (d != NULL)
+    if (d == NULL)
     {
+        printf("Aucun domaine trouvé sur nos serveurs. Demande en cours aux serveurs Google.\n");
+        return forward(buff, query_len, resp);
+    }
+    else
+    {
+        printf("Domaine trouvé : \n");
+        resp[*pos] = 0xC0;
+        resp[*pos + 1] = 0x0C;
+        *pos += 2;
+
+        resp[*pos] = 0x00;
+        resp[*pos + 1] = 0x01;
+        *pos += 2;
+
+        resp[*pos] = 0x00;
+        resp[*pos + 1] = 0x01;
+        *pos += 2;
+
+        resp[*pos] = 0x00;
+        resp[*pos + 1] = 0x00;
+        resp[*pos + 2] = 0x01;
+        resp[*pos + 3] = 0x2C;
+        *pos += 4;
+
+        resp[*pos] = 0x00;
+        resp[*pos + 1] = 0x04;
+        *pos += 2;
+
         resp[*pos] = d[0];
         resp[*pos + 1] = d[1];
         resp[*pos + 2] = d[2];
         resp[*pos + 3] = d[3];
+
+        *pos += 4;
+        return -1;
     }
-    else
-    {
-        resp[*pos] = 0x00;
-        resp[*pos + 1] = 0x00;
-        resp[*pos + 2] = 0x00;
-        resp[*pos + 3] = 0x00;
-    }
-    *pos += 4;
 }
 
-void send_resp(Record *table, Dns *dns, unsigned char *buff, int sockfd, struct sockaddr_in addr, socklen_t addr_len)
+void send_resp(Record *table, Dns *dns, unsigned char *buff, int sockfd, struct sockaddr_in addr, socklen_t addr_len, int query_len)
 {
     unsigned char resp[512];
     int cmt = parse_name(buff, 12, dns->header);
@@ -212,8 +239,12 @@ void send_resp(Record *table, Dns *dns, unsigned char *buff, int sockfd, struct 
     memcpy(resp + pos, buff + 12, cmt - 12);
     pos += cmt - 12;
 
-    build_resp(table, resp, &pos, dns->header->domaine);
-    sendto(sockfd, resp, pos, 0, (struct sockaddr *)&addr, addr_len);
+    int size = build_resp(table, resp, &pos, dns->header->domaine, buff, query_len);
+    if (size == -1)
+        sendto(sockfd, resp, pos, 0, (struct sockaddr *)&addr, addr_len);
+
+    else
+        sendto(sockfd, resp, size, 0, (struct sockaddr *)&addr, addr_len);
 }
 
 struct sockaddr_in init_addr()
@@ -227,13 +258,48 @@ struct sockaddr_in init_addr()
     return addr;
 }
 
+int load_table(Record *table, char *filename)
+{
+    FILE *f = fopen(filename, "r");
+    if (f == NULL)
+    {
+        perror("fopen");
+        return -1;
+    }
+
+    char line[256];
+    int cmt = 0;
+    while (fgets(line, sizeof(line), f) != NULL && cmt < MAX)
+    {
+        char *domaine = strtok(line, " ");
+        char *ip_str = strtok(NULL, " ");
+        char *token = strtok(ip_str, ".");
+        for (int i = 0; i < 4; i++)
+        {
+            table[cmt].ip[i] = atoi(token);
+            token = strtok(NULL, ".");
+        }
+        table[cmt].domaine = malloc(strlen(domaine) + 1);
+        strcpy(table[cmt].domaine, domaine);
+        cmt++;
+    }
+    fclose(f);
+    table[cmt].domaine = NULL;
+    printf("Chargement du fichier reussi.\n");
+    return cmt;
+}
+
 int main()
 {
-    Record table[4] = {
-        {"google.com", {142, 250, 74, 46}},
-        {"facebook.com", {0, 0, 0, 0}},
-        {"youtube.com", {172, 217, 20, 174}},
-        {NULL, {0}}};
+    Record table[MAX];
+    char *fname = "blocklist.txt";
+    int nb_enregistrement = load_table(table, fname);
+
+    if (nb_enregistrement == -1)
+    {
+        printf("Erreur au chargement du fichier.\n");
+        return 1;
+    }
 
     int sockfd = init_sockfd();
     struct sockaddr_in addr = init_addr();
@@ -253,11 +319,11 @@ int main()
     {
         Dns *dns = init_dns();
         unsigned char buff[512];
-        recvfrom(sockfd, buff, sizeof(buff), 0, (struct sockaddr *)&addr, &addr_len);
+        int query_len = recvfrom(sockfd, buff, sizeof(buff), 0, (struct sockaddr *)&addr, &addr_len);
         save_head(dns->header, buff);
 
         if ((int)dns->header->qdcount == 1)
-            send_resp(table, dns, buff, sockfd, addr, addr_len);
+            send_resp(table, dns, buff, sockfd, addr, addr_len, query_len);
         free_dns(dns);
     }
 }
