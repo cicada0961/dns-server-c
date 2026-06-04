@@ -1,0 +1,5 @@
+*.o
+src/*.o
+bin/
+build/
+dns

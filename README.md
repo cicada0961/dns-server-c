@@ -1,4 +1,4 @@
-# dns.c — Proxy DNS en C
+# dns — Proxy DNS en C
 
 Un serveur DNS proxy écrit from scratch en C, sans librairie externe. Résout les domaines depuis une table statique chargée depuis un fichier, bloque les domaines indésirables, et forward les requêtes inconnues vers Google DNS (`8.8.8.8`).
 
@@ -10,10 +10,31 @@ Un serveur DNS proxy écrit from scratch en C, sans librairie externe. Résout l
 - Bloque les domaines indésirables en répondant `0.0.0.0`
 - Forward les domaines inconnus vers `8.8.8.8` et retransmet la réponse au client
 
+## Structure du projet
+
+```
+dns/
+├── main.c          — boucle principale
+├── dns.h           — structs, defines, prototypes
+├── Makefile
+├── blocklist.txt   — table de résolution
+├── README.md
+└── src/
+    ├── socket.c    — init_dns, init_sockfd, init_addr
+    ├── table.c     — load_table, resolve
+    ├── parser.c    — parse_name, save_head, save_quest
+    ├── builder.c   — build_header, build_resp
+    ├── network.c   — forward, send_resp
+    └── utils.c     — print_screen, free_dns
+```
+
 ## Compilation
 
 ```bash
-gcc dns.c -o dns
+make        # compile
+make clean  # supprime les .o
+make fclean # supprime les .o et le binaire
+make re     # recompile from scratch
 ```
 
 ## Utilisation
@@ -45,7 +66,19 @@ youtube.com 172.217.20.174
 - `0.0.0.0` → domaine bloqué
 - Domaine absent du fichier → forwarded vers Google DNS
 
-Le fichier supporte jusqu'à 50 enregistrements (`#define MAX 50`).
+Le fichier supporte jusqu'à 50 enregistrements (`#define MAX 50` dans `dns.h`).
+
+## Ajouter un domaine
+
+Édite `blocklist.txt` et relance le serveur. Pas besoin de recompiler.
+
+```
+# bloquer un domaine
+malware.com 0.0.0.0
+
+# rediriger un domaine
+monsite.local 192.168.1.10
+```
 
 ## Architecture
 
